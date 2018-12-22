@@ -134,6 +134,10 @@ def get_nn_avg_dist(emb, query, knn):
     Compute the average distance of the `knn` nearest neighbors
     for a given set of embeddings and queries.
     Use Faiss if available.
+
+    :param emb a tensorflow tensor
+    :param query a tensorflow tensor
+    :param knn int that indicates the number of nearest neighbors.
     """
     if FAISS_AVAILABLE:
         with tf.Session().as_default():
@@ -307,7 +311,6 @@ def read_txt_embeddings(params, source, full_vocab):
     dico = Dictionary(id2word, word2id, lang)
     embeddings = np.concatenate(vectors, 0)
     embeddings = tf.convert_to_tensor(embeddings, dtype=tf.float64)
-    #embeddings = embeddings.cuda() if (params.cuda and not full_vocab) else embeddings
 
     assert tuple(embeddings.get_shape().as_list()) == (len(dico), params.emb_dim)
     return dico, embeddings
@@ -340,9 +343,9 @@ def load_pth_embeddings(params, source, full_vocab):
     lang = params.src_lang if source else params.tgt_lang
     data = pickle.load(open(params.src_emb, 'r') if source else params.tgt_emb)
     dico = data['dico']
-    embeddings = data['vectors']
+    embeddings = tf.convert_to_tensor(data['vectors'], dtype=tf.float64)
     assert dico.lang == lang
-    assert embeddings.size() == (len(dico), params.emb_dim)
+    assert tuple(embeddings.get_shape().as_list()) == (len(dico), params.emb_dim)
     logger.info("Loaded %i pre-trained word embeddings." % len(dico))
 
     # select a subset of word embeddings (to deal with casing)
@@ -350,9 +353,9 @@ def load_pth_embeddings(params, source, full_vocab):
         word2id, indexes = select_subset([dico[i] for i in range(len(dico))], params.max_vocab)
         id2word = {v: k for k, v in word2id.items()}
         dico = Dictionary(id2word, word2id, lang)
-        embeddings = embeddings[indexes]
+        embeddings = tf.gather(embeddings, indexes)
 
-    assert embeddings.size() == (len(dico), params.emb_dim)
+    assert tuple(embeddings.get_shape().as_list()) == (len(dico), params.emb_dim)
     return dico, embeddings
 
 
@@ -426,6 +429,10 @@ def normalize_embeddings(emb, types, mean=None):
 def export_embeddings(src_emb, tgt_emb, params):
     """
     Export embeddings to a text or a pickle file.
+
+    :param src_emb: 2-D float64 type tensorflow tensor ojbect for source embedding.
+    :param tgt_emb: 2-D float64 type tensorflow tensor ojbect for target embedding.
+    :param params: a parameter dictionary.
     """
     assert params.export in ["txt", "pth"]
 
@@ -436,13 +443,13 @@ def export_embeddings(src_emb, tgt_emb, params):
         # source embeddings
         logger.info('Writing source embeddings to %s ...' % src_path)
         with io.open(src_path, 'w', encoding='utf-8') as f:
-            f.write(u"%i %i\n" % src_emb.size())
+            f.write(u"%i %i\n" % src_emb.get_shape().as_list())
             for i in range(len(params.src_dico)):
                 f.write(u"%s %s\n" % (params.src_dico[i], " ".join('%.5f' % x for x in src_emb[i])))
         # target embeddings
         logger.info('Writing target embeddings to %s ...' % tgt_path)
         with io.open(tgt_path, 'w', encoding='utf-8') as f:
-            f.write(u"%i %i\n" % tgt_emb.size())
+            f.write(u"%i %i\n" % tgt_emb.get_shape().as_list())
             for i in range(len(params.tgt_dico)):
                 f.write(u"%s %s\n" % (params.tgt_dico[i], " ".join('%.5f' % x for x in tgt_emb[i])))
 

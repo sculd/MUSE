@@ -100,10 +100,8 @@ def get_sent_translation_accuracy(data, lg1, word2id1, emb1, lg2, word2id2, emb2
     # inverted softmax
     elif method.startswith('invsm_beta_'):
         beta = float(method[len('invsm_beta_'):])
-        scores = keys.mm(queries.transpose(0, 1)).transpose(0, 1)
-        scores.mul_(beta).exp_()
-        scores.div_(scores.sum(0, keepdim=True).expand_as(scores))
-        scores = scores.cpu()
+        scores = tf.exp(tf.multiply(tf.matmul(keys, tf.transpose(tf.transpose(queries))), beta))
+        scores = tf.divide(scores, tf.reduce_sum(scores, axis=0, keepdims=True))
 
     # contextual dissimilarity measure
     elif method.startswith('csls_knn_'):

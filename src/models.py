@@ -5,13 +5,11 @@
 # LICENSE file in the root directory of this source tree.
 #
 
-from torch import nn
 import tensorflow as tf
 
 from .utils import load_embeddings, normalize_embeddings
 
 def _normal_init(size):
-    #shape = size[0] if len(size) == 1 else size[1]
     return tf.random.normal(size, dtype=tf.float64)
 
 class Discriminator():
@@ -88,14 +86,12 @@ def build_model(params, with_dis):
     params.sess = tf.Session()
     src_dico, _src_emb = load_embeddings(params, source=True)
     params.src_dico = src_dico
-    #src_emb = tf.Variable(_src_emb, name="model_src_emb")
     src_emb = _src_emb
 
     # target embeddings
     if params.tgt_lang:
         tgt_dico, _tgt_emb = load_embeddings(params, source=False)
         params.tgt_dico = tgt_dico
-        #tgt_emb = tf.Variable(_tgt_emb, name="model_tgt_emb")
         tgt_emb = _tgt_emb
     else:
         tgt_emb = None
@@ -105,7 +101,6 @@ def build_model(params, with_dis):
 
     # discriminator
     discriminator = Discriminator(params) if with_dis else None
-    #discriminator = Discriminator(params)
 
     # normalize embeddings
     src_emb, params.src_mean = normalize_embeddings(src_emb, params.normalize_embeddings)

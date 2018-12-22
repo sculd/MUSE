@@ -8,7 +8,6 @@
 from logging import getLogger
 from copy import copy
 import numpy as np
-from torch.autograd import Variable
 
 import tensorflow as tf
 
@@ -243,12 +242,12 @@ class Evaluator(object):
         self.discriminator.eval()
 
         for i in range(0, self.src_emb.num_embeddings, bs):
-            emb = Variable(self.src_emb.weight[i:i + bs].data, volatile=True)
+            emb = self.src_emb[i:i + bs]
             preds = self.discriminator(self.generator.call(emb))
             src_preds.extend(preds.data.cpu().tolist())
 
         for i in range(0, self.tgt_emb.num_embeddings, bs):
-            emb = Variable(self.tgt_emb.weight[i:i + bs].data, volatile=True)
+            emb = self.tgt_emb[i:i + bs]
             preds = self.discriminator(emb)
             tgt_preds.extend(preds.data.cpu().tolist())
 

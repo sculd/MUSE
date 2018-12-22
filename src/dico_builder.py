@@ -130,8 +130,8 @@ def get_candidates(emb1, emb2, params):
     # confidence threshold
     if params.dico_threshold > 0:
         selected = diff > params.dico_threshold
-        logger.info("Selected %i / %i pairs above the confidence threshold." % (mask.sum(), diff.size(0)))
-        #mask = tf.broadcast_to(selected, all_pairs.get_shape())
+        logger.info("Selected %i / %i pairs above the confidence threshold." %
+                    (tf.reduce_sum(tf.cast(selected, tf.int32)).eval(session=params.sess), diff.get_shape().as_list[0]))
         all_pairs = tf.boolean_mask(all_pairs, tf.squeeze(selected, axis=1))
 
     return all_pairs
