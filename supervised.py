@@ -9,12 +9,13 @@ import os
 import json
 import argparse
 from collections import OrderedDict
-import torch
 
 from src.utils import bool_flag, initialize_exp
 from src.models import build_model
 from src.trainer import Trainer
 from src.evaluation import Evaluator
+
+import tensorflow as tf
 
 
 VALIDATION_METRIC_SUP = 'precision_at_1-csls_knn_10'
@@ -57,7 +58,6 @@ parser.add_argument("--normalize_embeddings", type=str, default="", help="Normal
 params = parser.parse_args()
 
 # check parameters
-assert not params.cuda or torch.cuda.is_available()
 assert params.dico_train in ["identical_char", "default"] or os.path.isfile(params.dico_train)
 assert params.dico_build in ["S2T", "T2S", "S2T|T2S", "S2T&T2S"]
 assert params.dico_max_size == 0 or params.dico_max_size < params.dico_max_rank
@@ -69,9 +69,13 @@ assert params.export in ["", "txt", "pth"]
 
 # build logger / model / trainer / evaluator
 logger = initialize_exp(params)
-src_emb, tgt_emb, mapping, _ = build_model(params, False)
-trainer = Trainer(src_emb, tgt_emb, mapping, None, params)
+src_emb, tgt_emb, generator, _ = build_model(params, False)
+trainer = Trainer(src_emb, tgt_emb, generator, None, params)
+
 evaluator = Evaluator(trainer)
+
+with params.sess.as_default():
+    params.sess.run(tf.global_variables_initializer())
 
 # load a training dictionary. if a dictionary path is not provided, use a default
 # one ("default") or create one based on identical character strings ("identical_char")
@@ -95,6 +99,7 @@ for n_iter in range(params.n_refinement + 1):
 
     # apply the Procrustes solution
     trainer.procrustes()
+    # evaluator.mapping = trainer.mapping
 
     # embeddings evaluation
     to_log = OrderedDict({'n_iter': n_iter})
@@ -104,7 +109,6 @@ for n_iter in range(params.n_refinement + 1):
     logger.info("__log__:%s" % json.dumps(to_log))
     trainer.save_best(to_log, VALIDATION_METRIC)
     logger.info('End of iteration %i.\n\n' % n_iter)
-
 
 # export embeddings
 if params.export:

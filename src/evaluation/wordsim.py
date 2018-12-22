@@ -9,7 +9,7 @@ import os
 import io
 from logging import getLogger
 import numpy as np
-import torch
+import tensorflow as tf
 from scipy.stats import spearmanr
 
 
@@ -110,7 +110,7 @@ def get_wordsim_scores(language, word2id, embeddings, lower=True):
     return scores
 
 
-def get_wordanalogy_scores(language, word2id, embeddings, lower=True):
+def get_wordanalogy_scores(language, word2id, embeddings, session, lower=True):
     """
     Return (english) word analogy score
     """
@@ -167,11 +167,11 @@ def get_wordanalogy_scores(language, word2id, embeddings, lower=True):
 
     # Compute score for each category
     for cat in queries:
-        qs = torch.from_numpy(np.vstack(queries[cat]))
-        keys = torch.from_numpy(embeddings.T)
-        values = qs.mm(keys).cpu().numpy()
+        qs = tf.convert_to_tensor(np.vstack(queries[cat]))
+        keys = tf.convert_to_tensor(embeddings.T)
+        values = tf.matmul(qs, keys).eval(session=session) # ??
 
-    # be sure we do not select input words
+        # be sure we do not select input words
         for i, ws in enumerate(word_ids[cat]):
             for wid in [ws[0], ws[1], ws[3]]:
                 values[i, wid] = -1e9

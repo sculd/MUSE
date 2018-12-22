@@ -9,9 +9,9 @@ import os
 from logging import getLogger
 import scipy
 import scipy.linalg
-import torch
-from torch.autograd import Variable
-from torch.nn import functional as F
+
+import numpy as np
+import tensorflow as tf
 
 from .utils import get_optimizer, load_embeddings, normalize_embeddings, export_embeddings
 from .utils import clip_parameters
@@ -24,7 +24,7 @@ logger = getLogger()
 
 class Trainer(object):
 
-    def __init__(self, src_emb, tgt_emb, mapping, discriminator, params):
+    def __init__(self, src_emb, tgt_emb, generator, discriminator, params):
         """
         Initialize trainer script.
         """
@@ -32,17 +32,18 @@ class Trainer(object):
         self.tgt_emb = tgt_emb
         self.src_dico = params.src_dico
         self.tgt_dico = getattr(params, 'tgt_dico', None)
-        self.mapping = mapping
+        self.generator = generator
         self.discriminator = discriminator
+        self.sess = params.sess
         self.params = params
 
         # optimizers
         if hasattr(params, 'map_optimizer'):
             optim_fn, optim_params = get_optimizer(params.map_optimizer)
-            self.map_optimizer = optim_fn(mapping.parameters(), **optim_params)
+            self.map_optimizer = optim_fn(**optim_params)
         if hasattr(params, 'dis_optimizer'):
             optim_fn, optim_params = get_optimizer(params.dis_optimizer)
-            self.dis_optimizer = optim_fn(discriminator.parameters(), **optim_params)
+            self.dis_optimizer = optim_fn(**optim_params)
         else:
             assert discriminator is None
 
@@ -59,24 +60,20 @@ class Trainer(object):
         bs = self.params.batch_size
         mf = self.params.dis_most_frequent
         assert mf <= min(len(self.src_dico), len(self.tgt_dico))
-        src_ids = torch.LongTensor(bs).random_(len(self.src_dico) if mf == 0 else mf)
-        tgt_ids = torch.LongTensor(bs).random_(len(self.tgt_dico) if mf == 0 else mf)
-        if self.params.cuda:
-            src_ids = src_ids.cuda()
-            tgt_ids = tgt_ids.cuda()
+        src_ids = tf.random.uniform((bs,), minval=0, maxval=len(self.src_dico) if mf == 0 else mf, dtype=tf.int64)
+        tgt_ids = tf.random.uniform((bs,), minval=0, maxval=len(self.tgt_dico) if mf == 0 else mf, dtype=tf.int64)
 
         # get word embeddings
-        src_emb = self.src_emb(Variable(src_ids, volatile=True))
-        tgt_emb = self.tgt_emb(Variable(tgt_ids, volatile=True))
-        src_emb = self.mapping(Variable(src_emb.data, volatile=volatile))
-        tgt_emb = Variable(tgt_emb.data, volatile=volatile)
+        src_emb = tf.gather(self.src_emb, src_ids)
+        tgt_emb = tf.gather(self.tgt_emb, tgt_ids)
+        src_emb = self.generator.call(src_emb)
 
         # input / target
-        x = torch.cat([src_emb, tgt_emb], 0)
-        y = torch.FloatTensor(2 * bs).zero_()
-        y[:bs] = 1 - self.params.dis_smooth
-        y[bs:] = self.params.dis_smooth
-        y = Variable(y.cuda() if self.params.cuda else y)
+        x = tf.concat([src_emb, tgt_emb], axis=0, name="dis_xy_x")
+        y = tf.Variable(tf.zeros((2 * bs,), dtype=tf.float64), name="dis_xy_y")
+        tf.assign(y, tf.convert_to_tensor(
+            [1 - self.params.dis_smooth for i in range(bs)] + [self.params.dis_smooth for i in range(bs)],
+            dtype=tf.float64))
 
         return x, y
 
@@ -84,23 +81,22 @@ class Trainer(object):
         """
         Train the discriminator.
         """
-        self.discriminator.train()
 
         # loss
         x, y = self.get_dis_xy(volatile=True)
-        preds = self.discriminator(Variable(x.data))
-        loss = F.binary_cross_entropy(preds, y)
-        stats['DIS_COSTS'].append(loss.data[0])
+        preds = self.discriminator.call(x)
+        loss = tf.losses.softmax_cross_entropy(y, preds)
+        #stats['DIS_COSTS'].append(loss.data[0])
 
+        '''
         # check NaN
         if (loss != loss).data.any():
             logger.error("NaN detected (discriminator)")
             exit()
+        '''
 
         # optim
-        self.dis_optimizer.zero_grad()
-        loss.backward()
-        self.dis_optimizer.step()
+        self.dis_optimizer.minimize(loss, var_list=self.discriminator.get_var_list())
         clip_parameters(self.discriminator, self.params.dis_clip_weights)
 
     def mapping_step(self, stats):
@@ -110,23 +106,20 @@ class Trainer(object):
         if self.params.dis_lambda == 0:
             return 0
 
-        self.discriminator.eval()
-
         # loss
         x, y = self.get_dis_xy(volatile=False)
-        preds = self.discriminator(x)
-        loss = F.binary_cross_entropy(preds, 1 - y)
-        loss = self.params.dis_lambda * loss
+        preds = self.discriminator.call(x)
+        loss = tf.losses.softmax_cross_entropy(1 - y, preds) * self.params.dis_lambda
 
+        '''
         # check NaN
         if (loss != loss).data.any():
             logger.error("NaN detected (fool discriminator)")
             exit()
+        '''
 
         # optim
-        self.map_optimizer.zero_grad()
-        loss.backward()
-        self.map_optimizer.step()
+        self.map_optimizer.minimize(loss, var_list=self.generator.get_var_list())
         self.orthogonalize()
 
         return 2 * self.params.batch_size
@@ -152,18 +145,14 @@ class Trainer(object):
         else:
             self.dico = load_dictionary(dico_train, word2id1, word2id2)
 
-        # cuda
-        if self.params.cuda:
-            self.dico = self.dico.cuda()
-
     def build_dictionary(self):
         """
         Build a dictionary from aligned embeddings.
         """
-        src_emb = self.mapping(self.src_emb.weight).data
-        tgt_emb = self.tgt_emb.weight.data
-        src_emb = src_emb / src_emb.norm(2, 1, keepdim=True).expand_as(src_emb)
-        tgt_emb = tgt_emb / tgt_emb.norm(2, 1, keepdim=True).expand_as(tgt_emb)
+        src_emb = self.generator.call(self.src_emb)
+        tgt_emb = self.tgt_emb
+        src_emb = tf.divide(src_emb, tf.norm(src_emb, ord=2, axis=1, keepdims=True))
+        tgt_emb = tf.divide(tgt_emb, tf.norm(tgt_emb, ord=2, axis=1, keepdims=True))
         self.dico = build_dictionary(src_emb, tgt_emb, self.params)
 
     def procrustes(self):
@@ -171,21 +160,18 @@ class Trainer(object):
         Find the best orthogonal matrix mapping using the Orthogonal Procrustes problem
         https://en.wikipedia.org/wiki/Orthogonal_Procrustes_problem
         """
-        A = self.src_emb.weight.data[self.dico[:, 0]]
-        B = self.tgt_emb.weight.data[self.dico[:, 1]]
-        W = self.mapping.weight.data
-        M = B.transpose(0, 1).mm(A).cpu().numpy()
-        U, S, V_t = scipy.linalg.svd(M, full_matrices=True)
-        W.copy_(torch.from_numpy(U.dot(V_t)).type_as(W))
+        A = tf.gather(self.src_emb, self.dico[:, 0])
+        B = tf.gather(self.tgt_emb, self.dico[:, 1])
+        M = tf.matmul(tf.transpose(B), A)
+        U, S, V_t = scipy.linalg.svd(M.eval(session=self.sess), full_matrices=True)
+        self.generator.update_mapping(tf.convert_to_tensor(U.dot(V_t), dtype=tf.float64))
 
     def orthogonalize(self):
         """
         Orthogonalize the mapping.
         """
         if self.params.map_beta > 0:
-            W = self.mapping.weight.data
-            beta = self.params.map_beta
-            W.copy_((1 + beta) * W - beta * W.mm(W.transpose(0, 1).mm(W)))
+            self.generator.orthogonalize(self.params.map_beta)
 
     def update_lr(self, to_log, metric):
         """
@@ -222,10 +208,10 @@ class Trainer(object):
             self.best_valid_metric = to_log[metric]
             logger.info('* Best value for "%s": %.5f' % (metric, to_log[metric]))
             # save the mapping
-            W = self.mapping.weight.data.cpu().numpy()
+            W = self.generator.eval_mapping(self.sess)
             path = os.path.join(self.params.exp_path, 'best_mapping.pth')
             logger.info('* Saving the mapping to %s ...' % path)
-            torch.save(W, path)
+            W.dump(path)
 
     def reload_best(self):
         """
@@ -235,10 +221,8 @@ class Trainer(object):
         logger.info('* Reloading the best model from %s ...' % path)
         # reload the model
         assert os.path.isfile(path)
-        to_reload = torch.from_numpy(torch.load(path))
-        W = self.mapping.weight.data
-        assert to_reload.size() == W.size()
-        W.copy_(to_reload.type_as(W))
+        to_reload = tf.convert_to_tensor(np.load(path), dtype=tf.float64)
+        self.generator.update_mapping(to_reload)
 
     def export(self):
         """
@@ -259,8 +243,8 @@ class Trainer(object):
         bs = 4096
         logger.info("Map source embeddings to the target space ...")
         for i, k in enumerate(range(0, len(src_emb), bs)):
-            x = Variable(src_emb[k:k + bs], volatile=True)
-            src_emb[k:k + bs] = self.mapping(x.cuda() if params.cuda else x).data.cpu()
+            x = tf.Variable(src_emb[k:k + bs])
+            src_emb[k:k + bs] = self.generator.call(x).eval(session=params.sess)
 
         # write embeddings to the disk
         export_embeddings(src_emb, tgt_emb, params)

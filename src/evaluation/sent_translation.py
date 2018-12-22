@@ -9,7 +9,7 @@ import os
 import io
 from logging import getLogger
 import numpy as np
-import torch
+import tensorflow as tf
 
 from src.utils import bow_idf, get_nn_avg_dist
 
@@ -63,15 +63,13 @@ def load_europarl_data(lg1, lg2, n_max=1e10, lower=True):
 
 
 def get_sent_translation_accuracy(data, lg1, word2id1, emb1, lg2, word2id2, emb2,
-                                  n_keys, n_queries, method, idf):
+                                  n_keys, n_queries, method, idf, session):
 
     """
     Given parallel sentences from Europarl, evaluate the
     sentence translation accuracy using the precision@k.
     """
     # get word vectors dictionaries
-    emb1 = emb1.cpu().numpy()
-    emb2 = emb2.cpu().numpy()
     word_vec1 = dict([(w, emb1[word2id1[w]]) for w in word2id1])
     word_vec2 = dict([(w, emb2[word2id2[w]]) for w in word2id2])
     word_vect = {lg1: word_vec1, lg2: word_vec2}
@@ -89,10 +87,10 @@ def get_sent_translation_accuracy(data, lg1, word2id1, emb1, lg2, word2id2, emb2
     queries = bow_idf(queries, word_vect[lg_query], idf_dict=idf[lg_query])
 
     # normalize embeddings
-    queries = torch.from_numpy(queries).float()
-    queries = queries / queries.norm(2, 1, keepdim=True).expand_as(queries)
-    keys = torch.from_numpy(keys).float()
-    keys = keys / keys.norm(2, 1, keepdim=True).expand_as(keys)
+    queries = tf.convert_to_tensor(queries, dtype=tf.float64)
+    queries = tf.divide(queries, tf.norm(queries, ord=2, axis=1, keepdims=True))
+    keys = tf.convert_to_tensor(keys, dtype=tf.float64)
+    keys = tf.divide(keys, tf.norm(queries, ord=2, axis=1, keepdims=True))
 
     # nearest neighbors
     if method == 'nn':
@@ -116,19 +114,19 @@ def get_sent_translation_accuracy(data, lg1, word2id1, emb1, lg2, word2id2, emb2
         knn = method[len('csls_knn_'):]
         assert knn.isdigit()
         knn = int(knn)
-        average_dist_keys = torch.from_numpy(get_nn_avg_dist(queries, keys, knn))
-        average_dist_queries = torch.from_numpy(get_nn_avg_dist(keys, queries, knn))
+        average_dist_keys = get_nn_avg_dist(queries, keys, knn)
+        average_dist_queries = get_nn_avg_dist(keys, queries, knn)
         # scores
-        scores = keys.mm(queries.transpose(0, 1)).transpose(0, 1)
-        scores.mul_(2)
-        scores.sub_(average_dist_queries[:, None].float() + average_dist_keys[None, :].float())
+        scores = tf.multiply(tf.transpose(tf.matmul(keys, tf.transpose(queries))), 2)
+        scores = tf.subtract(scores, average_dist_queries[:, None] + average_dist_keys[None, :])
         scores = scores.cpu()
 
     results = []
-    top_matches = scores.topk(10, 1, True)[1]
+    top_matches = tf.nn.top_k(scores, k=10, sorted=True)
     for k in [1, 5, 10]:
-        top_k_matches = (top_matches[:, :k] == torch.from_numpy(idx_query)[:, None]).sum(1)
-        precision_at_k = 100 * top_k_matches.float().numpy().mean()
+        top_k_matches = tf.reduce_sum(tf.cast(
+            tf.math.equal(top_matches[:, :k], tf.convert_to_tensor(idx_query)[:, None]), tf.int32), axis=1).eval(session=session)
+        precision_at_k = 100 * top_k_matches.mean()
         logger.info("%i queries (%s) - %s - Precision at k = %i: %f" %
                     (len(top_k_matches), lg_query.upper(), method, k, precision_at_k))
         results.append(('sent-precision_at_%i' % k, precision_at_k))

@@ -5,78 +5,111 @@
 # LICENSE file in the root directory of this source tree.
 #
 
-import torch
 from torch import nn
+import tensorflow as tf
 
 from .utils import load_embeddings, normalize_embeddings
 
+def _normal_init(size):
+    #shape = size[0] if len(size) == 1 else size[1]
+    return tf.random.normal(size, dtype=tf.float64)
 
-class Discriminator(nn.Module):
-
+class Discriminator():
     def __init__(self, params):
-        super(Discriminator, self).__init__()
-
         self.emb_dim = params.emb_dim
         self.dis_layers = params.dis_layers
         self.dis_hid_dim = params.dis_hid_dim
         self.dis_dropout = params.dis_dropout
         self.dis_input_dropout = params.dis_input_dropout
 
-        layers = [nn.Dropout(self.dis_input_dropout)]
+        self._var_list = []
         for i in range(self.dis_layers + 1):
             input_dim = self.emb_dim if i == 0 else self.dis_hid_dim
             output_dim = 1 if i == self.dis_layers else self.dis_hid_dim
-            layers.append(nn.Linear(input_dim, output_dim))
+            W = tf.Variable(_normal_init([input_dim, output_dim]), name="dis_W_%d" % (i))
+            B = tf.Variable(_normal_init([output_dim]), name="dis_B_%d" % (i))
+            self._var_list += [W, B]
+
+    def get_var_list(self):
+        return self._var_list
+
+    def call(self, x):
+        assert len(x.get_shape().as_list()) == 2 and x.get_shape().as_list()[1] == self.emb_dim
+        layer = tf.nn.dropout(x, keep_prob=1.0-self.dis_input_dropout)
+        for i in range(self.dis_layers + 1):
+            W, B = self._var_list[i*2 : i*2+2]
+            layer = tf.matmul(layer, W) + B
             if i < self.dis_layers:
-                layers.append(nn.LeakyReLU(0.2))
-                layers.append(nn.Dropout(self.dis_dropout))
-        layers.append(nn.Sigmoid())
-        self.layers = nn.Sequential(*layers)
+                layer = tf.nn.leaky_relu(layer, alpha=0.2)
+                layer = tf.nn.dropout(layer, keep_prob=1.0-self.dis_dropout)
+        layer = tf.sigmoid(layer)
+        return tf.squeeze(layer)
 
-    def forward(self, x):
-        assert x.dim() == 2 and x.size(1) == self.emb_dim
-        return self.layers(x).view(-1)
+class Generator():
+    def __init__(self, params):
+        self.emb_dim = params.emb_dim
 
+        self.mapping = None
+        if getattr(params, 'map_id_init', True):
+            self.mapping = tf.Variable(tf.eye(self.emb_dim, dtype=tf.float64), name="generator_mapping")
+        else:
+            tf.Variable(tf.truncated_normal([self.emb_dim, self.emb_dim], dtype=tf.float64), name="generator_mapping")
+
+        self._var_list = [self.mapping]
+
+    def get_var_list(self):
+        return self._var_list
+
+    def eval_mapping(self, session):
+        return self.mapping.eval(session=session)
+
+    def update_mapping(self, mapping):
+        assert tuple(mapping.get_shape().as_list()) == tuple(self.mapping.get_shape().as_list())
+        self.mapping = mapping
+
+    def call(self, x):
+        assert len(x.get_shape().as_list()) == 2 and x.get_shape().as_list()[1] == self.emb_dim
+        layer = tf.transpose(tf.matmul(self.mapping, tf.transpose(x)), name="generator_called")
+        return layer
+
+    def orthogonalize(self, beta):
+        """
+        Orthogonalize the mapping.
+        """
+        assert beta > 0
+        self.update_mapping((1 + beta) * self.mapping - beta * tf.matmul(self.mapping, tf.matmul(tf.transpose(self.mapping), self.mapping)))
 
 def build_model(params, with_dis):
     """
     Build all components of the model.
     """
     # source embeddings
+
+    params.sess = tf.Session()
     src_dico, _src_emb = load_embeddings(params, source=True)
     params.src_dico = src_dico
-    src_emb = nn.Embedding(len(src_dico), params.emb_dim, sparse=True)
-    src_emb.weight.data.copy_(_src_emb)
+    #src_emb = tf.Variable(_src_emb, name="model_src_emb")
+    src_emb = _src_emb
 
     # target embeddings
     if params.tgt_lang:
         tgt_dico, _tgt_emb = load_embeddings(params, source=False)
         params.tgt_dico = tgt_dico
-        tgt_emb = nn.Embedding(len(tgt_dico), params.emb_dim, sparse=True)
-        tgt_emb.weight.data.copy_(_tgt_emb)
+        #tgt_emb = tf.Variable(_tgt_emb, name="model_tgt_emb")
+        tgt_emb = _tgt_emb
     else:
         tgt_emb = None
 
     # mapping
-    mapping = nn.Linear(params.emb_dim, params.emb_dim, bias=False)
-    if getattr(params, 'map_id_init', True):
-        mapping.weight.data.copy_(torch.diag(torch.ones(params.emb_dim)))
+    generator = Generator(params)
 
     # discriminator
     discriminator = Discriminator(params) if with_dis else None
-
-    # cuda
-    if params.cuda:
-        src_emb.cuda()
-        if params.tgt_lang:
-            tgt_emb.cuda()
-        mapping.cuda()
-        if with_dis:
-            discriminator.cuda()
+    #discriminator = Discriminator(params)
 
     # normalize embeddings
-    params.src_mean = normalize_embeddings(src_emb.weight.data, params.normalize_embeddings)
+    src_emb, params.src_mean = normalize_embeddings(src_emb, params.normalize_embeddings)
     if params.tgt_lang:
-        params.tgt_mean = normalize_embeddings(tgt_emb.weight.data, params.normalize_embeddings)
+        tgt_emb, params.tgt_mean = normalize_embeddings(tgt_emb, params.normalize_embeddings)
 
-    return src_emb, tgt_emb, mapping, discriminator
+    return src_emb, tgt_emb, generator, discriminator

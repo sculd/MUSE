@@ -15,12 +15,12 @@ import inspect
 import argparse
 import subprocess
 import numpy as np
-import torch
-from torch import optim
+import tensorflow.train as tf_train
 from logging import getLogger
 
 from .logger import create_logger
 from .dictionary import Dictionary
+import tensorflow as tf
 
 
 MAIN_DUMP_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'dumped')
@@ -51,9 +51,7 @@ def initialize_exp(params):
     # initialization
     if getattr(params, 'seed', -1) >= 0:
         np.random.seed(params.seed)
-        torch.manual_seed(params.seed)
-        if params.cuda:
-            torch.cuda.manual_seed(params.seed)
+        tf.random.set_random_seed(params.seed)
 
     # dump parameters
     params.exp_path = get_exp_path(params)
@@ -138,8 +136,9 @@ def get_nn_avg_dist(emb, query, knn):
     Use Faiss if available.
     """
     if FAISS_AVAILABLE:
-        emb = emb.cpu().numpy()
-        query = query.cpu().numpy()
+        with tf.Session().as_default():
+            emb = emb.eval()
+            query = query.eval()
         if hasattr(faiss, 'StandardGpuResources'):
             # gpu mode
             res = faiss.StandardGpuResources()
@@ -155,13 +154,13 @@ def get_nn_avg_dist(emb, query, knn):
     else:
         bs = 1024
         all_distances = []
-        emb = emb.transpose(0, 1).contiguous()
+        emb = tf.transpose(emb)
         for i in range(0, query.shape[0], bs):
-            distances = query[i:i + bs].mm(emb)
-            best_distances, _ = distances.topk(knn, dim=1, largest=True, sorted=True)
-            all_distances.append(best_distances.mean(1).cpu())
-        all_distances = torch.cat(all_distances)
-        return all_distances.numpy()
+            distances = tf.tensordot(query[i:i + bs], emb, 1)
+            best_distances, _ = tf.nn.top_k(distances, k=knn, sorted=True)
+            all_distances.append(tf.reduce_mean(best_distances, axis=1))
+        all_distances = tf.concat(all_distances, axis=0)
+        return all_distances
 
 
 def bool_flag(s):
@@ -195,31 +194,31 @@ def get_optimizer(s):
         optim_params = {}
 
     if method == 'adadelta':
-        optim_fn = optim.Adadelta
+        optim_fn = tf_train.AdadeltaOptimizer
     elif method == 'adagrad':
-        optim_fn = optim.Adagrad
+        optim_fn = tf_train.AdagradOptimizer
     elif method == 'adam':
-        optim_fn = optim.Adam
+        optim_fn = tf_train.AdamOptimizer
     elif method == 'adamax':
-        optim_fn = optim.Adamax
+        raise Exception('"%s is not a supported optimization method"' % method)
     elif method == 'asgd':
-        optim_fn = optim.ASGD
+        raise Exception('"%s is not a supported optimization method"' % method)
     elif method == 'rmsprop':
-        optim_fn = optim.RMSprop
+        optim_fn = tf_train.RMSPropOptimizer
     elif method == 'rprop':
-        optim_fn = optim.Rprop
+        raise Exception('"%s is not a supported optimization method"' % method)
     elif method == 'sgd':
-        optim_fn = optim.SGD
-        assert 'lr' in optim_params
+        raise Exception('"%s is not a supported optimization method"' % method)
+        # assert 'lr' in optim_params
     else:
         raise Exception('Unknown optimization method: "%s"' % method)
 
     # check that we give good parameters to the optimizer
     expected_args = inspect.getargspec(optim_fn.__init__)[0]
-    assert expected_args[:2] == ['self', 'params']
-    if not all(k in expected_args[2:] for k in optim_params.keys()):
+    assert expected_args[:1] == ['self']
+    if not all(k in expected_args[1:] for k in optim_params.keys()):
         raise Exception('Unexpected parameters: expected "%s", got "%s"' % (
-            str(expected_args[2:]), str(optim_params.keys())))
+            str(expected_args[1:]), str(optim_params.keys())))
 
     return optim_fn, optim_params
 
@@ -307,10 +306,10 @@ def read_txt_embeddings(params, source, full_vocab):
     id2word = {v: k for k, v in word2id.items()}
     dico = Dictionary(id2word, word2id, lang)
     embeddings = np.concatenate(vectors, 0)
-    embeddings = torch.from_numpy(embeddings).float()
-    embeddings = embeddings.cuda() if (params.cuda and not full_vocab) else embeddings
+    embeddings = tf.convert_to_tensor(embeddings, dtype=tf.float64)
+    #embeddings = embeddings.cuda() if (params.cuda and not full_vocab) else embeddings
 
-    assert embeddings.size() == (len(dico), params.emb_dim)
+    assert tuple(embeddings.get_shape().as_list()) == (len(dico), params.emb_dim)
     return dico, embeddings
 
 
@@ -330,16 +329,16 @@ def select_subset(word_list, max_vocab):
         if max_vocab > 0 and len(word2id) >= max_vocab:
             break
     assert len(word2id) == len(indexes)
-    return word2id, torch.LongTensor(indexes)
+    return word2id, tf.convert_to_tensor(indexes, dtype=tf.int64)
 
 
 def load_pth_embeddings(params, source, full_vocab):
     """
-    Reload pretrained embeddings from a PyTorch binary file.
+    Reload pretrained embeddings from a pickle binary file.
     """
-    # reload PyTorch binary file
+    # reload pickle binary file
     lang = params.src_lang if source else params.tgt_lang
-    data = torch.load(params.src_emb if source else params.tgt_emb)
+    data = pickle.load(open(params.src_emb, 'r') if source else params.tgt_emb)
     dico = data['dico']
     embeddings = data['vectors']
     assert dico.lang == lang
@@ -367,20 +366,20 @@ def load_bin_embeddings(params, source, full_vocab):
     words = model.get_labels()
     assert model.get_dimension() == params.emb_dim
     logger.info("Loaded binary model. Generating embeddings ...")
-    embeddings = torch.from_numpy(np.concatenate([model.get_word_vector(w)[None] for w in words], 0))
+    embeddings = tf.convert_to_tensor(np.concatenate([model.get_word_vector(w)[None] for w in words], 0), dtype=tf.float64)
     logger.info("Generated embeddings for %i words." % len(words))
-    assert embeddings.size() == (len(words), params.emb_dim)
+    assert tuple(embeddings.get_shape().as_lits()) == (len(words), params.emb_dim)
 
     # select a subset of word embeddings (to deal with casing)
     if not full_vocab:
         word2id, indexes = select_subset(words, params.max_vocab)
-        embeddings = embeddings[indexes]
+        embeddings = tf.gather(embeddings, indexes)
     else:
         word2id = {w: i for i, w in enumerate(words)}
     id2word = {i: w for w, i in word2id.items()}
     dico = Dictionary(id2word, word2id, lang)
 
-    assert embeddings.size() == (len(dico), params.emb_dim)
+    assert tuple(embeddings.get_shape().as_list()) == (len(dico), params.emb_dim)
     return dico, embeddings
 
 
@@ -415,18 +414,18 @@ def normalize_embeddings(emb, types, mean=None):
             continue
         if t == 'center':
             if mean is None:
-                mean = emb.mean(0, keepdim=True)
-            emb.sub_(mean.expand_as(emb))
+                mean = tf.reduce_mean(emb, axis=0, keepdims=True)
+            emb = tf.subtract(emb, mean)
         elif t == 'renorm':
-            emb.div_(emb.norm(2, 1, keepdim=True).expand_as(emb))
+            emb = tf.divide(tf.norm(emb, ord=2, axis=1, keepdims=True))
         else:
             raise Exception('Unknown normalization type: "%s"' % t)
-    return mean.cpu() if mean is not None else None
+    return emb, (mean if mean is not None else None)
 
 
 def export_embeddings(src_emb, tgt_emb, params):
     """
-    Export embeddings to a text or a PyTorch file.
+    Export embeddings to a text or a pickle file.
     """
     assert params.export in ["txt", "pth"]
 
@@ -447,11 +446,11 @@ def export_embeddings(src_emb, tgt_emb, params):
             for i in range(len(params.tgt_dico)):
                 f.write(u"%s %s\n" % (params.tgt_dico[i], " ".join('%.5f' % x for x in tgt_emb[i])))
 
-    # PyTorch file
+    # export as pickle file
     if params.export == "pth":
         src_path = os.path.join(params.exp_path, 'vectors-%s.pth' % params.src_lang)
         tgt_path = os.path.join(params.exp_path, 'vectors-%s.pth' % params.tgt_lang)
         logger.info('Writing source embeddings to %s ...' % src_path)
-        torch.save({'dico': params.src_dico, 'vectors': src_emb}, src_path)
+        pickle.dump({'dico': params.src_dico, 'vectors': src_emb}, open(src_path, 'w'))
         logger.info('Writing target embeddings to %s ...' % tgt_path)
-        torch.save({'dico': params.tgt_dico, 'vectors': tgt_emb}, tgt_path)
+        pickle.dump({'dico': params.tgt_dico, 'vectors': tgt_emb}, open(tgt_path, 'w'))

@@ -6,10 +6,11 @@
 #
 
 from logging import getLogger
-from copy import deepcopy
+from copy import copy
 import numpy as np
 from torch.autograd import Variable
-from torch import Tensor as torch_tensor
+
+import tensorflow as tf
 
 from . import get_wordsim_scores, get_crosslingual_wordsim_scores, get_wordanalogy_scores
 from . import get_word_translation_accuracy
@@ -31,9 +32,16 @@ class Evaluator(object):
         self.tgt_emb = trainer.tgt_emb
         self.src_dico = trainer.src_dico
         self.tgt_dico = trainer.tgt_dico
-        self.mapping = trainer.mapping
+        self.generator = trainer.generator
         self.discriminator = trainer.discriminator
+        self.sess = trainer.sess
         self.params = trainer.params
+
+    def _eval_src_emb_mapping(self):
+        return self.generator.call(self.src_emb).eval(session=self.sess)
+
+    def _eval_tgt_emb_mapping(self):
+        return self.tgt_emb.eval(session=self.sess)
 
     def monolingual_wordsim(self, to_log):
         """
@@ -41,11 +49,11 @@ class Evaluator(object):
         """
         src_ws_scores = get_wordsim_scores(
             self.src_dico.lang, self.src_dico.word2id,
-            self.mapping(self.src_emb.weight).data.cpu().numpy()
+            self._eval_src_emb_mapping()
         )
         tgt_ws_scores = get_wordsim_scores(
             self.tgt_dico.lang, self.tgt_dico.word2id,
-            self.tgt_emb.weight.data.cpu().numpy()
+            self._eval_tgt_emb_mapping()
         ) if self.params.tgt_lang else None
         if src_ws_scores is not None:
             src_ws_monolingual_scores = np.mean(list(src_ws_scores.values()))
@@ -68,12 +76,14 @@ class Evaluator(object):
         """
         src_analogy_scores = get_wordanalogy_scores(
             self.src_dico.lang, self.src_dico.word2id,
-            self.mapping(self.src_emb.weight).data.cpu().numpy()
+            self._eval_src_emb_mapping(),
+            self.sess
         )
         if self.params.tgt_lang:
             tgt_analogy_scores = get_wordanalogy_scores(
                 self.tgt_dico.lang, self.tgt_dico.word2id,
-                self.tgt_emb.weight.data.cpu().numpy()
+                self._eval_tgt_emb_mapping(),
+                self.sess
             )
         if src_analogy_scores is not None:
             src_analogy_monolingual_scores = np.mean(list(src_analogy_scores.values()))
@@ -90,8 +100,9 @@ class Evaluator(object):
         """
         Evaluation on cross-lingual word similarity.
         """
-        src_emb = self.mapping(self.src_emb.weight).data.cpu().numpy()
-        tgt_emb = self.tgt_emb.weight.data.cpu().numpy()
+        src_emb = self._eval_src_emb_mapping()
+        tgt_emb = self._eval_tgt_emb_mapping()
+
         # cross-lingual wordsim evaluation
         src_tgt_ws_scores = get_crosslingual_wordsim_scores(
             self.src_dico.lang, self.src_dico.word2id, src_emb,
@@ -109,15 +120,16 @@ class Evaluator(object):
         Evaluation on word translation.
         """
         # mapped word embeddings
-        src_emb = self.mapping(self.src_emb.weight).data
-        tgt_emb = self.tgt_emb.weight.data
+        src_emb = self._eval_src_emb_mapping()
+        tgt_emb = self._eval_tgt_emb_mapping()
 
         for method in ['nn', 'csls_knn_10']:
             results = get_word_translation_accuracy(
                 self.src_dico.lang, self.src_dico.word2id, src_emb,
                 self.tgt_dico.lang, self.tgt_dico.word2id, tgt_emb,
                 method=method,
-                dico_eval=self.params.dico_eval
+                dico_eval=self.params.dico_eval,
+                session=self.params.sess
             )
             to_log.update([('%s-%s' % (k, method), v) for k, v in results])
 
@@ -145,8 +157,8 @@ class Evaluator(object):
             return
 
         # mapped word embeddings
-        src_emb = self.mapping(self.src_emb.weight).data
-        tgt_emb = self.tgt_emb.weight.data
+        src_emb = self._eval_src_emb_mapping()
+        tgt_emb = self._eval_tgt_emb_mapping()
 
         # get idf weights
         idf = get_idf(self.europarl_data, lg1, lg2, n_idf=n_idf)
@@ -159,7 +171,8 @@ class Evaluator(object):
                 self.src_dico.lang, self.src_dico.word2id, src_emb,
                 self.tgt_dico.lang, self.tgt_dico.word2id, tgt_emb,
                 n_keys=n_keys, n_queries=n_queries,
-                method=method, idf=idf
+                method=method, idf=idf,
+                session=self.params.sess
             )
             to_log.update([('tgt_to_src_%s-%s' % (k, method), v) for k, v in results])
 
@@ -169,7 +182,8 @@ class Evaluator(object):
                 self.tgt_dico.lang, self.tgt_dico.word2id, tgt_emb,
                 self.src_dico.lang, self.src_dico.word2id, src_emb,
                 n_keys=n_keys, n_queries=n_queries,
-                method=method, idf=idf
+                method=method, idf=idf,
+                session=self.params.sess
             )
             to_log.update([('src_to_tgt_%s-%s' % (k, method), v) for k, v in results])
 
@@ -178,17 +192,17 @@ class Evaluator(object):
         Mean-cosine model selection criterion.
         """
         # get normalized embeddings
-        src_emb = self.mapping(self.src_emb.weight).data
-        tgt_emb = self.tgt_emb.weight.data
-        src_emb = src_emb / src_emb.norm(2, 1, keepdim=True).expand_as(src_emb)
-        tgt_emb = tgt_emb / tgt_emb.norm(2, 1, keepdim=True).expand_as(tgt_emb)
+        src_emb = self.generator.call(self.src_emb)
+        tgt_emb = self.tgt_emb
+        src_emb = tf.divide(src_emb, tf.norm(src_emb, ord=2, axis=1, keepdims=True))
+        tgt_emb = tf.divide(tgt_emb, tf.norm(tgt_emb, ord=2, axis=1, keepdims=True))
 
         # build dictionary
         for dico_method in ['nn', 'csls_knn_10']:
             dico_build = 'S2T'
             dico_max_size = 10000
             # temp params / dictionary generation
-            _params = deepcopy(self.params)
+            _params = copy(self.params)
             _params.dico_method = dico_method
             _params.dico_build = dico_build
             _params.dico_threshold = 0
@@ -202,8 +216,8 @@ class Evaluator(object):
             if dico is None:
                 mean_cosine = -1e9
             else:
-                mean_cosine = (src_emb[dico[:dico_max_size, 0]] * tgt_emb[dico[:dico_max_size, 1]]).sum(1).mean()
-            mean_cosine = mean_cosine.item() if isinstance(mean_cosine, torch_tensor) else mean_cosine
+                mean_cosine = tf.reduce_mean(tf.reduce_sum(tf.gather(src_emb, dico[:dico_max_size, 0]) * tf.gather(tgt_emb, dico[:dico_max_size, 1]), axis=1), axis=0)
+            mean_cosine = mean_cosine.eval(session=self.params.sess) if isinstance(mean_cosine, tf.Tensor) else mean_cosine
             logger.info("Mean cosine (%s method, %s build, %i max size): %.5f"
                         % (dico_method, _params.dico_build, dico_max_size, mean_cosine))
             to_log['mean_cosine-%s-%s-%i' % (dico_method, _params.dico_build, dico_max_size)] = mean_cosine
@@ -230,7 +244,7 @@ class Evaluator(object):
 
         for i in range(0, self.src_emb.num_embeddings, bs):
             emb = Variable(self.src_emb.weight[i:i + bs].data, volatile=True)
-            preds = self.discriminator(self.mapping(emb))
+            preds = self.discriminator(self.generator.call(emb))
             src_preds.extend(preds.data.cpu().tolist())
 
         for i in range(0, self.tgt_emb.num_embeddings, bs):

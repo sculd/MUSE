@@ -11,7 +11,6 @@ import json
 import argparse
 from collections import OrderedDict
 import numpy as np
-import torch
 
 from src.utils import bool_flag, initialize_exp
 from src.models import build_model
@@ -79,7 +78,6 @@ parser.add_argument("--normalize_embeddings", type=str, default="", help="Normal
 params = parser.parse_args()
 
 # check parameters
-assert not params.cuda or torch.cuda.is_available()
 assert 0 <= params.dis_dropout < 1
 assert 0 <= params.dis_input_dropout < 1
 assert 0 <= params.dis_smooth < 0.5
@@ -92,8 +90,8 @@ assert params.export in ["", "txt", "pth"]
 
 # build model / trainer / evaluator
 logger = initialize_exp(params)
-src_emb, tgt_emb, mapping, discriminator = build_model(params, True)
-trainer = Trainer(src_emb, tgt_emb, mapping, discriminator, params)
+src_emb, tgt_emb, generator, discriminator = build_model(params, True)
+trainer = Trainer(src_emb, tgt_emb, generator, discriminator, params)
 evaluator = Evaluator(trainer)
 
 
