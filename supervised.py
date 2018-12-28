@@ -99,7 +99,6 @@ for n_iter in range(params.n_refinement + 1):
 
     # apply the Procrustes solution
     trainer.procrustes()
-    # evaluator.mapping = trainer.mapping
 
     # embeddings evaluation
     to_log = OrderedDict({'n_iter': n_iter})

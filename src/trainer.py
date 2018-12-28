@@ -75,6 +75,7 @@ class Trainer(object):
             [1 - self.params.dis_smooth for i in range(bs)] + [self.params.dis_smooth for i in range(bs)],
             dtype=tf.float64))
 
+        self.sess.run(tf.initializers.variables([y], name="dis_xy_y_initialized"))
         return x, y
 
     def dis_step(self, stats):
@@ -86,7 +87,7 @@ class Trainer(object):
         x, y = self.get_dis_xy(volatile=True)
         preds = self.discriminator.call(x)
         loss = tf.losses.softmax_cross_entropy(y, preds)
-        #stats['DIS_COSTS'].append(loss.data[0])
+        stats['DIS_COSTS'].append(loss.eval(session=self.sess))
 
         '''
         # check NaN

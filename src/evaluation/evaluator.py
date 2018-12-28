@@ -239,17 +239,15 @@ class Evaluator(object):
         src_preds = []
         tgt_preds = []
 
-        self.discriminator.eval()
-
-        for i in range(0, self.src_emb.num_embeddings, bs):
+        for i in range(0, self.src_emb.get_shape().as_list()[0], bs):
             emb = self.src_emb[i:i + bs]
-            preds = self.discriminator(self.generator.call(emb))
-            src_preds.extend(preds.data.cpu().tolist())
+            preds = self.discriminator.call(self.generator.call(emb))
+            src_preds.extend(preds.eval(session=self.sess))
 
-        for i in range(0, self.tgt_emb.num_embeddings, bs):
+        for i in range(0, self.tgt_emb.get_shape().as_list()[0], bs):
             emb = self.tgt_emb[i:i + bs]
-            preds = self.discriminator(emb)
-            tgt_preds.extend(preds.data.cpu().tolist())
+            preds = self.discriminator.call(emb)
+            tgt_preds.extend(preds.eval(session=self.sess))
 
         src_pred = np.mean(src_preds)
         tgt_pred = np.mean(tgt_preds)
@@ -258,8 +256,8 @@ class Evaluator(object):
 
         src_accu = np.mean([x >= 0.5 for x in src_preds])
         tgt_accu = np.mean([x < 0.5 for x in tgt_preds])
-        dis_accu = ((src_accu * self.src_emb.num_embeddings + tgt_accu * self.tgt_emb.num_embeddings) /
-                    (self.src_emb.num_embeddings + self.tgt_emb.num_embeddings))
+        dis_accu = ((src_accu * self.src_emb.get_shape().as_list()[0] + tgt_accu * self.tgt_emb.get_shape().as_list()[0]) /
+                    (self.src_emb.get_shape().as_list()[0] + self.tgt_emb.get_shape().as_list()[0]))
         logger.info("Discriminator source / target / global accuracy: %.5f / %.5f / %.5f"
                     % (src_accu, tgt_accu, dis_accu))
 

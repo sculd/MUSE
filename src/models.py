@@ -51,7 +51,7 @@ class Generator():
         if getattr(params, 'map_id_init', True):
             self.mapping = tf.Variable(tf.eye(self.emb_dim, dtype=tf.float64), name="generator_mapping")
         else:
-            tf.Variable(tf.truncated_normal([self.emb_dim, self.emb_dim], dtype=tf.float64), name="generator_mapping")
+            self.mapping = tf.Variable(tf.truncated_normal([self.emb_dim, self.emb_dim], dtype=tf.float64), name="generator_mapping")
 
         self._var_list = [self.mapping]
 

@@ -172,4 +172,4 @@ def build_dictionary(src_emb, tgt_emb, params, s2t_candidates=None, t2s_candidat
         dico = tf.convert_to_tensor([(int(a), int(b),) for (a, b) in final_pairs], dtype=tf.int64)
 
     logger.info('New train dictionary of %i pairs.' % dico.eval(session=params.sess).shape[0])
-    return dico.cuda() if params.cuda else dico
+    return dico

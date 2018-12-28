@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 #
 
+import inspect
 import os
 import time
 import json
@@ -16,6 +17,8 @@ from src.utils import bool_flag, initialize_exp
 from src.models import build_model
 from src.trainer import Trainer
 from src.evaluation import Evaluator
+
+import tensorflow as tf
 
 
 VALIDATION_METRIC = 'mean_cosine-csls_knn_10-S2T-10000'
@@ -52,9 +55,9 @@ parser.add_argument("--dis_clip_weights", type=float, default=0, help="Clip disc
 parser.add_argument("--adversarial", type=bool_flag, default=True, help="Use adversarial training")
 parser.add_argument("--n_epochs", type=int, default=5, help="Number of epochs")
 parser.add_argument("--epoch_size", type=int, default=1000000, help="Iterations per epoch")
-parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
-parser.add_argument("--map_optimizer", type=str, default="sgd,lr=0.1", help="Mapping optimizer")
-parser.add_argument("--dis_optimizer", type=str, default="sgd,lr=0.1", help="Discriminator optimizer")
+parser.add_argument("--batch_size", type=int, default=100, help="Batch size")
+parser.add_argument("--map_optimizer", type=str, default="adagrad,learning_rate=0.1", help="Mapping optimizer")
+parser.add_argument("--dis_optimizer", type=str, default="adagrad,learning_rate=0.1", help="Discriminator optimizer")
 parser.add_argument("--lr_decay", type=float, default=0.98, help="Learning rate decay (SGD only)")
 parser.add_argument("--min_lr", type=float, default=1e-6, help="Minimum learning rate (SGD only)")
 parser.add_argument("--lr_shrink", type=float, default=0.5, help="Shrink the learning rate if the validation metric decreases (1 to disable)")
@@ -94,6 +97,8 @@ src_emb, tgt_emb, generator, discriminator = build_model(params, True)
 trainer = Trainer(src_emb, tgt_emb, generator, discriminator, params)
 evaluator = Evaluator(trainer)
 
+with params.sess.as_default():
+    params.sess.run(tf.global_variables_initializer())
 
 """
 Learning loop for Adversarial Training
@@ -144,10 +149,14 @@ if params.adversarial:
 
         # update the learning rate (stop if too small)
         trainer.update_lr(to_log, VALIDATION_METRIC)
+
+        # early stopping is disabled for now
+        '''
+        inspect.getargspec(trainer.map_optimizer.__init__)[0]['learning_rate']
         if trainer.map_optimizer.param_groups[0]['lr'] < params.min_lr:
             logger.info('Learning rate < 1e-6. BREAK.')
             break
-
+        '''
 
 """
 Learning loop for Procrustes Iterative Refinement

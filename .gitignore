@@ -124,4 +124,7 @@ Session.vim
 # auto-generated tag files
 tags
 
+### Intellij ###
+.idea/*
+
 # End of https://www.gitignore.io/api/vim,python
